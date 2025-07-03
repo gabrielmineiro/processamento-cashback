@@ -14,7 +14,6 @@ export class BatchWorker implements OnModuleInit {
   ) {
     const batchSize = this.configService.get('BATCH_SIZE', '10');
     this.BATCH_SIZE = parseInt(batchSize);
-    console.log('BATCH_SIZE configurado:', this.BATCH_SIZE);
   }
 
   async onModuleInit() {
