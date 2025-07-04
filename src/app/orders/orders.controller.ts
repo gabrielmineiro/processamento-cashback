@@ -19,11 +19,8 @@ export class OrdersController {
       const insert = await this.ordersService.createOrder(order);
 
       this.logger.log('Pedido Criado');
-      this.logger.log('Enviando pedido para fila');
 
       await this.rabbitMQService.publishToQueue('main_queue', insert);
-
-      this.logger.log('Pedido enviado para a fila com sucesso!');
 
       return res.status(201).json({
         message: 'Pedido criado com sucesso!',

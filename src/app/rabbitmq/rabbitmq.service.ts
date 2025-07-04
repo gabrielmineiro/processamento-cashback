@@ -13,6 +13,7 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
   private channel: Channel;
   private connection: Connection;
   private readonly MAX_RETRIES: number;
+  private CURRENT_ATTEMPT: number = 0;
 
   constructor(private configService: ConfigService) {
     const maxRetries = this.configService.get('MAX_RETRIES', '3');
@@ -40,14 +41,20 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
       });
 
       this.channel = await this.connection.createChannel();
+      this.channel.on('error', (error) => {
+        this.logger.error(`Erro no canal: ${error.message}`);
+      });
+      this.channel.on('close', () => {
+        this.logger.warn('Canal fechado');
+      });
       await this.setupQueues();
       this.logger.log('Conectado ao RabbitMQ!');
     } catch (error) {
       this.logger.error(`Falha na conexão: ${error.message}`);
       this.logger.warn(
-        'RabbitMQ não disponível. Tentando reconectar em 10 segundos...',
+        'RabbitMQ não disponível. Tentando reconectar em 5 segundos...',
       );
-      setTimeout(() => this.connect(), 10000);
+      setTimeout(() => this.connect(), 5000);
     }
   }
 
@@ -82,18 +89,35 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
   }
 
   async publishToQueue(queue: string, message: any) {
-    if (!this.channel) {
-      this.logger.warn('RabbitMQ não conectado. Mensagem não enviada.');
-      return;
-    }
     try {
+      if (!this.channel) {
+        this.logger.warn('RabbitMQ não conectado. Tentando reconectar...');
+        await this.connect();
+      }
+
+      this.logger.log('Enviando pedido para fila...');
       this.channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)), {
         persistent: true,
         headers: message.headers || {},
       });
+      this.logger.log('Pedido enviado para a fila com sucesso!');
     } catch (error) {
-      this.logger.error(`Erro ao publicar mensagem: ${error.message}`);
-      throw error;
+      this.logger.error(`Erro ao publicar mensagem na fila ${queue}:`, error);
+
+      if (this.CURRENT_ATTEMPT < 3) {
+        this.CURRENT_ATTEMPT++;
+        this.logger.warn(
+          `Tentativa ${this.CURRENT_ATTEMPT} de 3. Reenviando em 500ms...`,
+        );
+        setTimeout(() => {
+          this.publishToQueue(queue, message);
+        }, 500);
+      } else {
+        this.logger.error(
+          'Número máximo de tentativas atingido. Desistindo de enviar a mensagem.',
+        );
+        this.CURRENT_ATTEMPT = 0;
+      }
     }
   }
 
@@ -102,76 +126,103 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
     batchSize: number,
     callback: (messages: any[]) => Promise<void>,
   ) {
-    this.logger.log('entrei no consumeFromQueueBatch');
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
 
-    if (!this.channel) {
-      this.logger.warn(
-        'RabbitMQ não conectado. Não é possível consumir mensagens.',
-      );
-      return;
-    }
+    this.logger.log(`Iniciando consumo em lotes de ${batchSize} mensagens`);
 
-    const validBatchSize = Number(batchSize) || 10;
-    this.logger.log(`Configurando prefetch para ${validBatchSize} mensagens`);
-
-    await this.channel.prefetch(validBatchSize);
-
-    const rawMessages: any[] = [];
-
-    await this.channel.consume(queue, async (msg) => {
-      if (!msg) return;
-
-      const content = JSON.parse(msg.content.toString());
-      rawMessages.push(msg);
-
-      if (rawMessages.length >= validBatchSize) {
-        const batch = await Promise.all(
-          rawMessages.map(async (rawMsg) => {
-            const headers = rawMsg.properties.headers || {};
-            const retryCount = headers['x-retry-count'] || 0;
-            try {
-              await callback(rawMsg);
-
-              this.channel.ack(rawMsg);
-            } catch (error) {
-              this.logger.error(`Erro ao processar mensagem: ${error.message}`);
-
-              if (retryCount >= this.MAX_RETRIES) {
-                this.logger.warn(
-                  `Excedido limite de retries. Enviando para DLQ`,
-                );
-
-                this.channel.sendToQueue('dlq', rawMsg.content, {
-                  persistent: true,
-                  headers,
-                });
-              } else {
-                const updatedHeaders = {
-                  ...headers,
-                  'x-retry-count': retryCount + 1,
-                };
-
-                this.logger.warn(
-                  `Retry #${updatedHeaders['x-retry-count']} - mensagem encaminhada para retry_queue`,
-                );
-                this.channel.sendToQueue('retry_queue', rawMsg.content, {
-                  persistent: true,
-                  headers: updatedHeaders,
-                });
-              }
-
-              this.channel.ack(rawMsg);
-            }
-          }),
-        );
-
-        this.logger.log(
-          `Lote de ${batch.length} mensagens processado com sucesso`,
-        );
-
-        rawMessages.length = 0;
+    while (true) {
+      if (!this.channel) {
+        this.logger.warn('Canal não está disponível. Tentando reconectar...');
+        await this.connect();
+        await sleep(5000);
+        continue;
       }
-    });
+
+      const queueInfo = await this.channel.checkQueue(queue);
+      const messageCount = queueInfo.messageCount;
+
+      if (messageCount >= batchSize) {
+        const batch: any[] = [];
+
+        for (let i = 0; i < batchSize; i++) {
+          const msg = await this.channel.get(queue, { noAck: false });
+          if (msg) {
+            batch.push(msg);
+          }
+        }
+
+        this.logger.log(`Consumindo lote de ${batch.length} mensagens`);
+
+        for (const msg of batch) {
+          if (!this.channel || this.channel.closed) {
+            this.logger.warn('Canal fechado durante processamento');
+            return;
+          }
+
+          const headers = msg.properties.headers || {};
+          const retryCount = headers['x-retry-count'] || 0;
+
+          try {
+            await callback(msg);
+            this.safeAck(msg);
+          } catch (error) {
+            this.logger.error(`Erro ao processar mensagem: ${error.message}`);
+
+            if (retryCount >= this.MAX_RETRIES) {
+              this.logger.warn(`Excedido limite de retries. Enviando para DLQ`);
+              this.safeSendToQueue('dlq', msg.content, {
+                persistent: true,
+                headers,
+              });
+            } else {
+              const updatedHeaders = {
+                ...headers,
+                'x-retry-count': retryCount + 1,
+              };
+              this.logger.warn(
+                `Retry #${updatedHeaders['x-retry-count']} - mensagem encaminhada para retry_queue`,
+              );
+              this.safeSendToQueue('retry_queue', msg.content, {
+                persistent: true,
+                headers: updatedHeaders,
+              });
+            }
+            this.safeAck(msg);
+          }
+        }
+        this.logger.log(`Lote de ${batch.length} mensagens processado`);
+      } else {
+        this.logger.log(
+          `Aguardando lote. Faltam ${batchSize - messageCount} mensagens...`,
+        );
+        await sleep(2000);
+      }
+    }
+  }
+
+  private safeSendToQueue(queue: string, content: Buffer, options: any) {
+    try {
+      if (this.channel && !this.channel.closed) {
+        this.channel.sendToQueue(queue, content, options);
+      }
+    } catch (error) {
+      this.logger.warn(`Erro ao enviar para fila ${queue}: ${error.message}`);
+    }
+  }
+
+  private safeAck(msg: any) {
+    try {
+      if (this.channel && !this.channel.closed) {
+        this.channel.ack(msg);
+      } else {
+        this.logger.warn(
+          'Canal fechado - não é possível fazer ack da mensagem',
+        );
+      }
+    } catch (error) {
+      this.logger.warn(`Erro ao fazer ack da mensagem: ${error.message}`);
+    }
   }
 
   async onModuleDestroy() {
