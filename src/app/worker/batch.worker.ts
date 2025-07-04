@@ -1,16 +1,17 @@
-// src/workers/batch.worker.ts
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RabbitMQService } from '../rabbitmq/rabbitmq.service';
-
+import { OrdersService } from '../orders/orders.service';
 @Injectable()
 export class BatchWorker implements OnModuleInit {
   private batch: any[] = [];
   private readonly BATCH_SIZE: number;
+  private readonly logger = new Logger('BATCH_WORKER');
 
   constructor(
     private rabbitMQService: RabbitMQService,
     private configService: ConfigService,
+    private ordersService: OrdersService,
   ) {
     const batchSize = this.configService.get('BATCH_SIZE', '10');
     this.BATCH_SIZE = parseInt(batchSize);
@@ -28,15 +29,20 @@ export class BatchWorker implements OnModuleInit {
     }, 1000);
   }
 
-  private async processBatch(messages: any[]) {
+  private async processBatch(message: any) {
     try {
-      console.log(`Processando mensagem:`, messages);
-      
-      // Simula processamento (ex.: salvar no banco)
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      
-      console.log('Lote processado com sucesso!');
+      const rawMsg = message.content.toString();
+      const parse_message = JSON.parse(rawMsg);
+
+      await this.ordersService.changeStatus(
+        parse_message[0].id,
+        'CASHBACK_PROCESSADO',
+      );
+      this.logger.log(`mensagem ${parse_message[0].id} processada com sucesso`);
     } catch (error) {
+      this.logger.error(
+        `Ocorreu um erro ao processar mensagem ${error.message}`,
+      );
       console.error('Erro no lote:', error);
       throw error;
     }

@@ -1,7 +1,6 @@
-// src/rabbitmq/rabbitmq.module.ts
 import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
-import { RabbitMQService } from './rabbitmq.service'
+import { RabbitMQService } from './rabbitmq.service';
 
 @Module({
   imports: [
@@ -10,7 +9,7 @@ import { RabbitMQService } from './rabbitmq.service'
         name: 'RABBITMQ_SERVICE',
         transport: Transport.RMQ,
         options: {
-          urls: ['amqp://localhost:5672'],
+          urls: ['amqp://admin:admin@rabbitmq:5672'],
           queue: 'main_queue',
           queueOptions: {
             durable: true,

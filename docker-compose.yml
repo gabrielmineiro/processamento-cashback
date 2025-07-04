@@ -1,29 +1,46 @@
 services:
+  app:
+    build: .
+    ports:
+      - '3000:3000'
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_DATABASE=ecommerce
+      - RABBITMQ_URL=amqp://admin:admin@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
   postgres:
-    image: postgres:15-alpine  # Versão leve
+    image: postgres:15-alpine
     container_name: pg_ecommerce
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin123
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
       POSTGRES_DB: ecommerce
-      PGDATA: /var/lib/postgresql/data/pgdata  # Otimização para Alpine
     ports:
-      - "5432:5432"
+      - '5456:5432'
     volumes:
-      - pg_data:/var/lib/postgresql/data  # Persistência
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # Scripts iniciais (opcional)
+      - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d ecommerce"]
+      test: ['CMD-SHELL', 'pg_isready -U user -d ecommerce']
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # Integração com RabbitMQ (do seu desafio)
   rabbitmq:
     image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - '5672:5672'
+      - '15672:15672'
 
 volumes:
   pg_data:
