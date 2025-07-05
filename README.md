@@ -39,7 +39,7 @@ DB_PORT=5456
 
 RABBITMQ_URL=amqp://admin:admin@rabbitmq:5672
 
-BATCH_SIZE=1
+BATCH_SIZE=10
 
 MAX_RETRIES=2
 ```
